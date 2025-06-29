@@ -1,0 +1,137 @@
+name: Build LineageOS 17.1
+
+on:
+  workflow_dispatch:
+    inputs:
+      device_codename:
+        description: "Device codename (e.g. a23, mido)"
+        required: true
+      device_tree:
+        description: "Device tree repo URL"
+        required: true
+      device_tree_branch:
+        description: "Device tree branch"
+        required: true
+      vendor_tree:
+        description: "Vendor tree repo URL"
+        required: true
+      vendor_tree_branch:
+        description: "Vendor tree branch"
+        required: true
+      kernel_tree:
+        description: "Kernel tree repo URL"
+        required: true
+      kernel_tree_branch:
+        description: "Kernel tree branch"
+        required: true
+      prebuilt_kernel:
+        description: "Use prebuilt kernel (true/false)"
+        required: false
+        default: "false"
+      tg_bot_token:
+        description: "Telegram Bot Token (optional, can set as secret)"
+        required: false
+      tg_chat_id:
+        description: "Telegram Chat ID (optional, can set as secret)"
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      ROM_NAME: lineage
+      ROM_VERSION: 17.1
+      USE_CCACHE: 1
+      CCACHE_DIR: /home/runner/.ccache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openjdk-8-jdk bc bison build-essential curl flex g++-multilib \
+            gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
+            xsltproc zip zlib1g-dev python-is-python3 repo ccache
+
+      - name: Set up repo
+        run: |
+          mkdir ~/android && cd ~/android
+          repo init -u https://github.com/LineageOS/android.git -b lineage-17.1
+          repo sync -c --no-tags --no-clone-bundle -j$(nproc --all)
+
+      - name: Clone device sources
+        run: |
+          cd ~/android
+          git clone ${{ github.event.inputs.device_tree }} -b ${{ github.event.inputs.device_tree_branch }} device/${{ github.event.inputs.device_codename }}/
+          git clone ${{ github.event.inputs.vendor_tree }} -b ${{ github.event.inputs.vendor_tree_branch }} vendor/${{ github.event.inputs.device_codename }}/
+          git clone ${{ github.event.inputs.kernel_tree }} -b ${{ github.event.inputs.kernel_tree_branch }} kernel/${{ github.event.inputs.device_codename }}/
+
+      - name: Optional: Use prebuilt kernel
+        if: ${{ github.event.inputs.prebuilt_kernel == 'true' }}
+        run: echo "Prebuilt kernel handling assumed in device tree."
+
+      - name: Prepare build environment
+        run: |
+          cd ~/android
+          export CCACHE_DIR=${{ env.CCACHE_DIR }}
+          ccache -M 5G
+          source build/envsetup.sh
+          lunch lineage_${{ github.event.inputs.device_codename }}-userdebug
+
+      - name: Build ROM
+        id: build
+        run: |
+          cd ~/android
+          mka bacon -j$(nproc --all) 2>&1 | tee build.log
+
+      - name: Find output zip
+        id: findzip
+        run: |
+          cd ~/android/out/target/product/${{ github.event.inputs.device_codename }}
+          ZIP=$(ls *lineage*.zip | tail -n 1)
+          echo "zip=$ZIP" >> $GITHUB_OUTPUT
+
+      - name: Upload ROM to Telegram
+        if: ${{ success() && steps.findzip.outputs.zip != '' }}
+        run: |
+          BOT_TOKEN="${{ github.event.inputs.tg_bot_token || secrets.TG_BOT_TOKEN }}"
+          CHAT_ID="${{ github.event.inputs.tg_chat_id || secrets.TG_CHAT_ID }}"
+          if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
+            curl -F document=@~/android/out/target/product/${{ github.event.inputs.device_codename }}/${{ steps.findzip.outputs.zip }} \
+                 -F chat_id="$CHAT_ID" \
+                 -F caption="✅ LineageOS 17.1 for ${{ github.event.inputs.device_codename }} built successfully!" \
+                 https://api.telegram.org/bot$BOT_TOKEN/sendDocument
+          else
+            echo "Telegram token or chat ID missing, skipping upload"
+          fi
+
+      - name: Upload build log to Telegram
+        if: always()
+        run: |
+          BOT_TOKEN="${{ github.event.inputs.tg_bot_token || secrets.TG_BOT_TOKEN }}"
+          CHAT_ID="${{ github.event.inputs.tg_chat_id || secrets.TG_CHAT_ID }}"
+          if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
+            curl -F document=@~/android/build.log \
+                 -F chat_id="$CHAT_ID" \
+                 -F caption="📝 Build log for ${{ github.event.inputs.device_codename }} (Status: ${{ job.status }})" \
+                 https://api.telegram.org/bot$BOT_TOKEN/sendDocument
+          else
+            echo "Telegram token or chat ID missing, skipping log upload"
+          fi
+
+      - name: Upload ROM artifact (backup)
+        if: ${{ success() && steps.findzip.outputs.zip != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineage-${{ github.event.inputs.device_codename }}-${{ env.ROM_VERSION }}
+          path: ~/android/out/target/product/${{ github.event.inputs.device_codename }}/*.zip
+
+      - name: Cleanup build files
+        run: |
+          rm -rf ~/android/out/*
+          rm -f ~/android/build.log
