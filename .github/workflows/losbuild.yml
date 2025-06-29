@@ -71,7 +71,7 @@ jobs:
           git clone ${{ github.event.inputs.vendor_tree }} -b ${{ github.event.inputs.vendor_tree_branch }} vendor/${{ github.event.inputs.device_codename }}/
           git clone ${{ github.event.inputs.kernel_tree }} -b ${{ github.event.inputs.kernel_tree_branch }} kernel/${{ github.event.inputs.device_codename }}/
 
-      - name: Optional: Use prebuilt kernel
+      - name: Optional:Use prebuilt kernel
         if: ${{ github.event.inputs.prebuilt_kernel == 'true' }}
         run: echo "Prebuilt kernel handling assumed in device tree."
 
